@@ -51,7 +51,7 @@ class Server:
             self.config.write("secret_key", secret_key)
 
         self.app = app = Flask(__name__, static_folder=gui_dir, template_folder=gui_dir)
-        app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 1
+        app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # ← ОТКЛЮЧИЛИ КЭШ
         app.config["SECRET_KEY"] = secret_key
 
         app.context_processor(self.context_processor)
@@ -65,6 +65,7 @@ class Server:
             app.add_url_rule("/scan", "scan", self.scan)
             app.add_url_rule("/scan/trigger", "scan_trigger", self.scan_trigger)
             app.add_url_rule("/scan/select", "scan_select", self.scan_select)
+            app.add_url_rule("/status", "status", self.status)  # ← FIX: без global server
 
         self.notify = Notify(
             default_notification_title="SkyRC MC3000 status update",
@@ -80,7 +81,9 @@ class Server:
         return variables
 
     def after_request(self, response):
-        response.headers["Cache-Control"] = "no-store"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
         return response
 
     def index(self):
@@ -95,17 +98,32 @@ class Server:
         if self.scan_thread is None:
             self.scan_thread = SafeThread(target=self._background_scan, daemon=True)
             self.scan_thread.start()
-        return jsonify({
-            "status": "ok",
-        })
+        return jsonify({"status": "ok"})
 
     def scan_select(self):
         ble_address = request.args.get("ble_address")
         self.config.write("ble_address", ble_address)
         self.spawn_service()
-        return jsonify({
-            "status": "ok",
-        })
+        return jsonify({"status": "ok"})
+
+    # ← НОВЫЙ ENDPOINT ДЛЯ СТАТУСА ПОДКЛЮЧЕНИЯ
+    def status(self):
+        connected = False
+        has_recent_data = False
+
+        if self.service and hasattr(self.service, "running"):
+            connected = self.service.running
+
+        if self.last_update_time:
+            has_recent_data = (time() - self.last_update_time) < 10  # Данные < 10 сек
+
+        return jsonify(
+            {
+                "connected": connected,
+                "has_recent_data": has_recent_data,
+                "last_update": self.last_update_time,
+            }
+        )
 
     def _background_scan(self):
         try:
@@ -122,10 +140,12 @@ class Server:
                 devices = await scanner.discover()
                 formatted = []
                 for device in devices:
-                    formatted.append({
-                        "address": device.address,
-                        "name": device.name,
-                    })
+                    formatted.append(
+                        {
+                            "address": device.address,
+                            "name": device.name,
+                        }
+                    )
                 return formatted
 
             data = self.get_loop().run_until_complete(run())
@@ -139,24 +159,26 @@ class Server:
                 if device["name"] is None:
                     device["name"] = "unknown"
                 name = "%s (%s)" % (device["address"], device["name"])
-                results.append("<a href=\"#\" data-address=\"" + device["address"] + "\">" + name + "</a>")
+                results.append(
+                    '<a href="#" data-address="' + device["address"] + '">' + name + "</a>"
+                )
 
-            self.update_client_side({
-                "scan_results": "<br>".join(results),
-            })
+            self.update_client_side(
+                {
+                    "scan_results": "<br>".join(results),
+                }
+            )
 
             self.scan_thread = None
         except Exception as e:
             logging.exception(e)
-            self.update_client_side({
-                "scan_results": "error, please try again"
-            })
+            self.update_client_side({"scan_results": "error, please try again"})
 
     def update_client_side(self, payload):
         for window in webview.windows:
-            payload = json.dumps(payload)
-            payload = payload.replace("\\", "\\\\")
-            window.evaluate_js("window.app.update('" + payload + "');")
+            payload_str = json.dumps(payload)
+            payload_str = payload_str.replace("\\", "\\\\")
+            window.evaluate_js("window.app.update('" + payload_str + "');")
 
     def set_title(self, title):
         for window in webview.windows:
@@ -189,6 +211,7 @@ class Server:
         if not self.profiles_mode:
             self.spawn_service()
             self.spawn_timeout()
+
         self.app.run(host=host, port=port, threaded=True, use_reloader=False)
 
     def spawn_service(self):
@@ -227,9 +250,7 @@ class Server:
                 time_pieces.pop(-1)
             battery_info["time"] = " ".join(time_pieces)
 
-        self.update_client_side({
-            "battery_info": battery_info,
-        })
+        self.update_client_side({"battery_info": battery_info})
 
         self.last_update_time = time()
 
@@ -237,14 +258,20 @@ class Server:
         if slot_index == 3:
             separator = "•" if self.separator else "⁃"
             self.separator = not self.separator
-            self.set_title("%s %s %s" % (self.title, separator, pendulum.now().format("HH:mm:ss")))
+            self.set_title(
+                "%s %s %s"
+                % (self.title, separator, pendulum.now().format("HH:mm:ss"))
+            )
 
         if slot_index not in self.previous:
             self.previous[slot_index] = None
 
         if battery_info["status"].lower() not in ["standby", "charge", "discharge"]:
             if self.previous[slot_index] != battery_info["status"]:
-                self.notify.message = "Slot %s changed status to '%s'" % (slot_index + 1, battery_info["status"])
+                self.notify.message = "Slot %s changed status to '%s'" % (
+                    slot_index + 1,
+                    battery_info["status"],
+                )
                 self.notify.send()
 
         if self.previous[slot_index] != battery_info["status"]:
@@ -273,31 +300,32 @@ class Server:
         self.set_title("%s - %s" % (self.title, "Trying to connect..."))
 
     def run_window(self):
-        api = Api(*server.address)
-        url = "http://%s:%s" % server.address
+        api = Api(*self.address)
+        url = "http://%s:%s" % self.address
 
         path = os.path.join(config.project_dir, "assets", "loading.html")
-        with open(path, "r") as file:
+        with open(path, "r", encoding="utf-8") as file:
             body = file.read()
         body = body.replace("%URL%", url)
 
+        # ✅ ФИКСИРОВАННЫЕ ПАРАМЕТРЫ ОКНА
         parameters = {
             "html": body,
             "js_api": api,
             "text_select": True,
+            "resizable": False,        # Блокируем ресайз
+            "min_size": (820, 620),    # Минимум
+            "width": 820,
+            "height": 620,
+            "x": None,                 # ✅ Фикс KeyError
+            "y": None,                 # ✅ Фикс KeyError
+            "title": "%s - Trying to connect..." % self.title,
         }
-        if profiles_mode:
-            parameters["width"] = self.config.read("profiles_window_width", 780)
-            parameters["height"] = self.config.read("profiles_window_height", 780)
-            parameters["x"] = self.config.read("profiles_window_x", None)
-            parameters["y"] = self.config.read("profiles_window_y", None)
-            parameters["title"] = "%s USB Profiles" % server.title
-        else:
-            parameters["width"] = self.config.read("monitor_window_width", 780)
-            parameters["height"] = self.config.read("monitor_window_height", 370)
-            parameters["x"] = self.config.read("monitor_window_x", None)
-            parameters["y"] = self.config.read("monitor_window_y", None)
-            parameters["title"] = "%s - Trying to connect..." % server.title
+
+        if self.profiles_mode:
+            parameters["width"] = 420
+            parameters["height"] = 780
+            parameters["title"] = "%s USB Profiles" % self.title
 
         self.clamp_coordinates(parameters)
 
@@ -366,8 +394,12 @@ class Api:
             connection.request("GET", "/")
             response = connection.getresponse()
             return response.status in [200, 302]
-        except:
+        except Exception:
             return False
+
+
+# Глобальная переменная (оставлена, т.к. используется в __main__)
+server = None
 
 
 if __name__ == "__main__":
@@ -390,5 +422,5 @@ if __name__ == "__main__":
         raise
     except KeyboardInterrupt:
         exit(1)
-    except:
+    except Exception:
         logging.exception(sys.exc_info()[0])

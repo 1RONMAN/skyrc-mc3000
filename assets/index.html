@@ -1,5 +1,12 @@
 {% extends 'layout.html' %}
 {% block body %}
+    <!-- ПЕРЕКЛЮЧАТЕЛЬ ТЕМЫ -->
+    <div style="padding: 10px; text-align: right;">
+        <button id="theme-toggle" class="btn btn-default button" style="font-size: 12px; padding: 4px 8px;">
+            🌙 Dark
+        </button>
+    </div>
+    
     <div class="wrapper">
         <div class="scroll-view">
             <div class="content">
@@ -78,4 +85,60 @@
             </div>
         </div>
     </div>
+
+    <!-- СТАТУС ИНДИКАТОР ПОДКЛЮЧЕНИЯ -->
+    <div class="connection-status" id="connection-status">
+        <div class="status-indicator" id="status-indicator"></div>
+        <span id="status-text">Disconnected</span>
+    </div>
+
+    <!-- JS ПЕРЕКЛЮЧАТЕЛЬ ТЕМЫ + СТАТУС -->
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const toggle = document.getElementById('theme-toggle');
+            const html = document.documentElement;
+            
+            // Тема (исправляем)
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            html.setAttribute('data-theme', savedTheme);
+            toggle.textContent = savedTheme === 'dark' ? '☀️ Light' : '🌙 Dark';
+            
+            toggle.addEventListener('click', function() {
+                const currentTheme = html.getAttribute('data-theme');
+                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                html.setAttribute('data-theme', newTheme);
+                localStorage.setItem('theme', newTheme);
+                toggle.textContent = newTheme === 'dark' ? '☀️ Light' : '🌙 Dark';
+            });
+            
+            // СТАТУС ПОДКЛЮЧЕНИЯ
+            const statusIndicator = document.getElementById('status-indicator');
+            const statusText = document.getElementById('status-text');
+            
+            function updateConnectionStatus(connected) {
+                if (connected) {
+                    statusIndicator.className = 'status-indicator connected pulsing';
+                    statusText.textContent = 'Connected, receiving data...';
+                } else {
+                    statusIndicator.className = 'status-indicator disconnected';
+                    statusText.textContent = 'Disconnected';
+                }
+            }
+            
+            // Проверяем статус каждые 3 секунды
+            setInterval(() => {
+                fetch('/status')
+                    .then(response => response.json())
+                    .then(data => updateConnectionStatus(data.connected && data.has_recent_data))
+                    .catch(error => {
+                        console.error('Status check failed:', error);
+                        updateConnectionStatus(false);
+                    });
+            }, 3000);
+            
+            // Начальный статус
+            updateConnectionStatus(false);
+        });
+    </script>
+
 {% endblock %}
